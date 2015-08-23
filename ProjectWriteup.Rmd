@@ -1,0 +1,165 @@
+---
+title: "MachineLearningProject"
+output: html_document
+---
+#Summary
+The aim of this study is to produce a machine learning algorithm that accurately predicts the quality of execution during exercise using measurements captured by body sensors as described in the Weight Lifting Exercise Dataset compiled by Velloso et al (Ref: http://groupware.les.inf.puc-rio.br/har). The final model is based on a Random Forest algorithm applied to 52 predictors of the original set of 160. I used 10-fold K Means cross-validation to achieve an optimal model with 99.3% accuracy. Applying this algorithm to a testing subset of the training data (4904 observations), I estimate an out-of-sample rate of 0.57%. 
+
+# Loading and preprocessing the data
+The training dataset and caret package were loaded as follows. 
+
+```{r, warning=FALSE, message=FALSE}
+library(caret)
+training <- read.csv("pml-training.csv", header = T)
+```
+Examining the structure of the dataset showed that the first seven variables were 'book keeping' variables and served no purpose in prediction. These were thus removed. 
+```{R}
+training <- training[,-(1:7)]
+```
+
+##Removing variables with near-zero covariance
+As an initial pre-processing step, I examined the dataset for variables with near-zero covariance using the nearZeroVar() function. 
+```{r}
+##Looking for zero covariates
+nearZero <- nearZeroVar(training, saveMetrics = T)
+head(nearZero)
+```
+Any variable with near-zero covariance was removed, leaving a dataframe with 94 observations remaining.
+```{r}
+nearZeroIndex <- nearZero[nearZero$nzv == TRUE, ]
+zeroNames <- row.names(nearZeroIndex)
+Names <- names(training)
+goodNamesRevInd <- Names %in% zeroNames
+goodNames <- Names[!goodNamesRevInd]
+trainingCov <- training[, goodNames]
+```
+
+##Removing summary variables
+Many of these variables in the dataset contain mostly NA values. These values were summary values, in other words, variables that were calculated from the raw data values. Because these variables likely have little predictive power, I also removed them from the dataset.
+```{r}
+TCraws <- trainingCov[, ! apply(trainingCov, 2, 
+                               function(x) any(is.na(x)))]
+```
+The resulting dataset, TCraws, contains 19622 observations of 53 variables and represents my trimmed, pre-processed training set. 
+
+#Model selection
+##Subsetting into sub-train and sub-test subsets
+To train and test possible models, I split my trimmed training set and subsetted it into sub-train and a sub-test subsets containing 75% and 25% of the data, respectively.
+```{r}
+set.seed(0708)
+insubTrain <- createDataPartition(y = TCraws$classe, p = 0.75, list = F)
+subTrain <- TCraws[insubTrain,]
+subTest <- TCraws[-insubTrain,]
+```
+The subTrain set is still large (14,718 observations), making the computation for model selection cumbersome. To stream-line the process, I selected a subset of the subTrain data containing 5% of the data. This contained 736 observations and was my sample training set for model selection.
+```{r}
+subTrain3Index <- seq(from = 1, to = nrow(subTrain), by = 20)
+subTrain3 <- subTrain[subTrain3Index, ]
+```
+
+##Testing and tuning model parameters
+Because this dataset contains both numeric and categorical data, I chose possible algorithms that had dual use (http://topepo.github.io/caret/modelList.html). I shortlisted this to three model types: bagging, boosting with trees and Random Forest. (Code is listed below, but not evaluated in this document.)
+```{r, cache=TRUE, eval=FALSE}
+##Treebagging with bootstrapping resampling
+CARTTrain13 <- train(classe ~ ., data = subTrain3,
+                     method = "rpart")
+
+##Boosting with trees with bootstrapping resampling
+gbmTrain113 <- train(classe ~ ., data = subTrain3,
+                   method = "gbm",
+                   verbose = F)
+##Random Forest with bootstrapping resampling
+rfTrainAB13 <- train(classe ~ ., data = subTrain3,
+                    method = "rf")
+CARTTrain13
+gbmTrain113
+rfTrainAB13
+```
+
+These models produced maximum accuracies of 47%, 79% and 80%, respectively.
+
+To further train the models, I introduced K-means cross-validation in place of bootstrapping. (Code is listed below, but not evaluated in this document.)
+```{r, cache=TRUE, eval=FALSE}
+##Set train control for K-means resampling
+ctrl <- trainControl(method = "repeatedcv", repeats = 3)
+##Test the models again
+CARTTrain23 <- train(classe ~ ., data = subTrain3,
+                     method = "rpart",
+                     trControl = ctrl)
+gbmTrain23 <- train(classe ~ ., data = subTrain3,
+                   method = "gbm",
+                   trControl = ctrl,
+                   verbose = F)
+rfTrainAB23 <- train(classe ~ ., data = subTrain3,
+                    method = "rf",
+                    trControl = ctrl)
+CARTTrain23
+gbmTrain23
+rfTrainAB23
+```
+
+This increased maximum accuracies to 46.6%, 82.3% and 84.8%, respectively. I concluded that prediction with trees performed better on this dataset than bagging, and that the Random Forest algorithm slightly out-performed boosting. 
+
+To determine if normalized pre-processing might futher-improve the Random Forest algorithm, I tested it with the following code. (Code is listed below, but not evaluated in this document.)
+```{r, cache=TRUE, eval=FALSE}
+rfTrainAB33 <- train(classe ~ ., data = subTrain3,
+                     method = "rf",
+                     trControl = ctrl,
+                     preProc = c("center", "scale"))
+rfTrainAB33
+```
+
+This produced lower accuracy than above, so I decided not to include pre-processing algorithms in the final model.
+
+##Training the final model
+To train my final model, I applied the Random Forest algorithm with K-means cross-validation to the larger sub-training dataset of 14,718 observations. (Code is listed below, but not evaluated in this document.)
+```{r, cache=TRUE, eval=FALSE}
+ctrl <- trainControl(method = "repeatedcv", repeats = 3)
+rfModel1 <- train(classe ~ ., data = subTrain,
+                     method = "rf",
+                     trControl = ctrl)
+rfModel1
+rfModel1$finalModel
+```
+
+This model achieves 99.29% accuracy with an out-of-bounds estimated error rate of 0.57%. However, this algorithm was computationally expensive, requiring nearly an hour to calculate on a computer with 4 GB of RAM.
+
+I therefore made some adjustments to the tuning parameters and used the randomForest algorith directly (outside of the caret train() function) to speed up the computation. 
+```{r, message=FALSE, warning=F}
+##Using direct rf function
+library(randomForest)
+set.seed(123)
+ctrl2 <- trainControl(method = "repeatedcv", repeats = 3,
+                      returnData = F,
+                      returnResamp = "none",
+                      savePredictions = F)
+rfModel3 <- randomForest(classe ~ ., data = subTrain, trControl = ctrl2)
+rfModel3
+```
+
+##Testing the model on the sub-test subset of the training set.
+With final model in hand, I tested its performance on my subTest subset of the training set. 
+```{r}
+set.seed(124)
+DirRFPred <- predict(rfModel3, subTest)
+```
+
+To assess the performance of the model on the test set, I performed a few simple diagnostic tests to look for prediction accuracy and out-of-sample error rates.
+```{r}
+##Table of predicted values versus true values
+table(DirRFPred, subTest$classe)
+```
+```{r}
+##Calculate success rate
+success <- DirRFPred == subTest$classe
+##Produce table of success rate
+table(success)
+##Calculate out-of-sample error rate
+oosRate <- length(success[success == FALSE])/length(success)
+oosRate
+```
+
+The output from these comands shows the success rate table as well as the out-of-sample error rate, which is 0.57%.
+
+#Conclusions
+In this study, I examined three types of predictive algorithms for accuracy in making predictions on the Weight Lifting Exercise Dataset compiled by Velloso et al. I found that a Random Forest algorithm, combined with K-means cross-validation, produced a robust, accurate model with an out-of-sample error rate of 0.59%. Moreover, I saw first-hand how tweeking tuning parameters and making wise choices about tuning commands can greatly affect computational demands of the algorithm.
